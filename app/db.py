@@ -22,6 +22,8 @@ def create_db_engine(settings: Settings):
     return create_engine(
         settings.database_url,
         pool_pre_ping=True,
+        pool_size=20,  # Размер пула соединений (по умолчанию 5)
+        max_overflow=40,  # Дополнительные соединения сверх pool_size
         connect_args={"connect_timeout": int(settings.api_timeout), "client_encoding": "UTF8"},
         echo=False,  # Отключаем вывод SQL запросов
         future=True,

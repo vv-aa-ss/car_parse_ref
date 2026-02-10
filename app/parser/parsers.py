@@ -9,27 +9,14 @@ class BrandData:
     id: int
     name: str
     logo_url: Optional[str]
-    series_count: Optional[int]
-    first_letter: Optional[str]
-
-
-@dataclass(frozen=True)
-class FactoryData:
-    id: int
-    brand_id: int
-    name: str
-    real_brand_id: Optional[int]
 
 
 @dataclass(frozen=True)
 class SeriesData:
     id: int
     brand_id: int
-    factory_id: Optional[int]
     name: str
-    state: Optional[int]
     is_new_energy: Optional[bool]
-    spec_count: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -37,47 +24,85 @@ class SpecData:
     id: int
     series_id: int
     name: str
-    spec_status: Optional[int]
-    year: Optional[str]
     min_price: Optional[str]
-    dealer_price: Optional[str]
-    condition: Optional[Dict[str, Any]]
-    sort: Optional[int]
 
 
 @dataclass(frozen=True)
 class ParamTitleData:
-    item_id: int
+    series_id: int
     title_id: int
     item_name: str
     group_name: Optional[str]
     item_type: Optional[str]
-    sort: Optional[int]
-    baike_url: Optional[str]
-    baike_id: Optional[int]
 
 
 @dataclass(frozen=True)
 class ParamValueData:
-    spec_id: int
+    specification_id: int
     title_id: int
     item_name: str
     sub_name: Optional[str]
     value: Optional[str]
-    price_info: Optional[str]
-    video_url: Optional[str]
-    color_info: Optional[Dict[str, Any]]
-    raw: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PhotoColorData:
+    id: int
+    series_id: int
+    color_type: str  # "interior" или "exterior"
+    name: str
+    value: Optional[str]
+
+    isonsale: Optional[bool]
+
+
+@dataclass(frozen=True)
+class PhotoCategoryData:
+    id: int
+    series_id: int
+    name: str
+
+
+@dataclass(frozen=True)
+class PhotoData:
+    id: str  # ID фото из API
+    series_id: int
+    specification_id: int
+    category_id: int
+    color_id: int
+    originalpic: Optional[str]
+
+    specname: Optional[str]
+
+
+@dataclass(frozen=True)
+class PanoramaColorData:
+    """Данные о цвете для 360-градусных фото."""
+    id: int  # Id из color_info
+    spec_id: int
+    ext_id: Optional[int]  # ext.Id из baseinfo
+    base_color_name: Optional[str]  # BaseColorName
+    color_name: str  # ColorName
+    color_value: Optional[str]  # ColorValue (HEX)
+    color_id: int  # ColorId (используется в getVrInfo)
+
+
+@dataclass(frozen=True)
+class PanoramaPhotoData:
+    """Данные о 360-градусном фото."""
+    id: str  # Уникальный ID (spec_id_color_id_seq)
+    spec_id: int
+    color_id: int  # ColorId из PanoramaColor
+    seq: int  # Порядковый номер кадра
+    url: str  # URL фото
 
 
 def parse_tree_menu(payload: Dict[str, Any]) -> Dict[str, List[Any]]:
     result = payload.get("result") or []
     brands: List[BrandData] = []
-    factories: List[FactoryData] = []
     series_list: List[SeriesData] = []
 
     for letter_group in result:
-        first_letter = letter_group.get("firstletter")
         for brand in letter_group.get("branditems") or []:
             brand_id = brand.get("id")
             if brand_id is None:
@@ -87,22 +112,9 @@ def parse_tree_menu(payload: Dict[str, Any]) -> Dict[str, List[Any]]:
                     id=int(brand_id),
                     name=str(brand.get("name") or ""),
                     logo_url=brand.get("logo"),
-                    series_count=brand.get("seriescount"),
-                    first_letter=first_letter,
                 )
             )
             for factory in brand.get("fctitems") or []:
-                factory_id = factory.get("id")
-                if factory_id is None:
-                    continue
-                factories.append(
-                    FactoryData(
-                        id=int(factory_id),
-                        brand_id=int(brand_id),
-                        name=str(factory.get("name") or ""),
-                        real_brand_id=factory.get("realbid"),
-                    )
-                )
                 for series in factory.get("seriesitems") or []:
                     series_id = series.get("id")
                     if series_id is None:
@@ -111,17 +123,14 @@ def parse_tree_menu(payload: Dict[str, Any]) -> Dict[str, List[Any]]:
                         SeriesData(
                             id=int(series_id),
                             brand_id=int(brand_id),
-                            factory_id=int(factory_id),
                             name=str(series.get("name") or ""),
-                            state=series.get("state"),
                             is_new_energy=bool(series.get("isnewenergy"))
                             if series.get("isnewenergy") is not None
                             else None,
-                            spec_count=series.get("speccount"),
                         )
                     )
 
-    return {"brands": brands, "factories": factories, "series": series_list}
+    return {"brands": brands, "series": series_list}
 
 
 def parse_param_conf(payload: Dict[str, Any], series_id: int) -> Dict[str, List[Any]]:
@@ -130,25 +139,25 @@ def parse_param_conf(payload: Dict[str, Any], series_id: int) -> Dict[str, List[
     datalist = result.get("datalist") or []
 
     titles: List[ParamTitleData] = []
+    seen_title_ids: set[int] = set()
     for group in titlelist:
         group_name = group.get("groupname")
         item_type = group.get("itemtype")
-        sort = group.get("sort")
         for item in group.get("items") or []:
-            item_id = item.get("itemid")
             title_id = item.get("titleid")
-            if item_id is None or title_id is None:
+            if title_id is None:
                 continue
+            tid = int(title_id)
+            if tid in seen_title_ids:
+                continue  # title_id уникален в рамках серии
+            seen_title_ids.add(tid)
             titles.append(
                 ParamTitleData(
-                    item_id=int(item_id),
-                    title_id=int(title_id),
+                    series_id=series_id,
+                    title_id=tid,
                     item_name=str(item.get("itemname") or ""),
                     group_name=group_name,
                     item_type=item_type,
-                    sort=sort,
-                    baike_url=item.get("baikeurl"),
-                    baike_id=item.get("baikeid"),
                 )
             )
 
@@ -164,12 +173,7 @@ def parse_param_conf(payload: Dict[str, Any], series_id: int) -> Dict[str, List[
                 id=spec_id_int,
                 series_id=series_id,
                 name=str(spec_item.get("specname") or ""),
-                spec_status=spec_item.get("specstatus"),
-                year=str(spec_item.get("year")) if spec_item.get("year") is not None else None,
                 min_price=spec_item.get("minprice"),
-                dealer_price=spec_item.get("dealerprice"),
-                condition=spec_item.get("condition"),
-                sort=spec_item.get("sort"),
             )
         )
 
@@ -196,15 +200,11 @@ def parse_param_conf(payload: Dict[str, Any], series_id: int) -> Dict[str, List[
                 for sub in sublist:
                     param_values.append(
                         ParamValueData(
-                            spec_id=spec_id_int,
+                            specification_id=spec_id_int,
                             title_id=int(title_id),
                             item_name=item_name,
                             sub_name=sub.get("name") or "",
                             value=sub.get("value"),
-                            price_info=sub.get("priceinfo") or conf.get("priceinfo"),
-                            video_url=conf.get("videourl"),
-                            color_info=conf.get("colorinfo"),
-                            raw=conf,
                         )
                     )
             else:
@@ -214,15 +214,11 @@ def parse_param_conf(payload: Dict[str, Any], series_id: int) -> Dict[str, List[
                 
                 param_values.append(
                     ParamValueData(
-                        spec_id=spec_id_int,
+                        specification_id=spec_id_int,
                         title_id=int(title_id),
                         item_name=item_name,  # Название из titlelist
                         sub_name="",  # Пустая строка вместо None
                         value=value,  # Значение из conf.itemname
-                        price_info=conf.get("priceinfo"),
-                        video_url=conf.get("videourl"),
-                        color_info=conf.get("colorinfo"),
-                        raw=conf,
                     )
                 )
 
@@ -255,3 +251,248 @@ def limit_series_per_brand(
         limited.extend(series_by_brand[brand_id])
     
     return limited
+
+
+def parse_photo_info(payload: Dict[str, Any], series_id: int) -> Dict[str, List[Any]]:
+    """
+    Парсит информацию о фото для серии автомобиля.
+    Извлекает цвета (interior/exterior) и категории фото.
+    """
+    result = payload.get("result") or {}
+    
+    colors: List[PhotoColorData] = []
+    categories: List[PhotoCategoryData] = []
+    
+    # Парсим цвета интерьера
+    interior_colors = result.get("interiorcolor") or []
+    for color in interior_colors:
+        color_id = color.get("id")
+        if color_id is None:
+            continue
+        colors.append(
+            PhotoColorData(
+                id=int(color_id),
+                series_id=series_id,
+                color_type="interior",
+                name=str(color.get("name") or ""),
+                value=color.get("value"),
+
+                isonsale=bool(color.get("isonsale")) if color.get("isonsale") is not None else None,
+            )
+        )
+    
+    # Парсим цвета экстерьера
+    exterior_colors = result.get("exteriorcolor") or []
+    for color in exterior_colors:
+        color_id = color.get("id")
+        if color_id is None:
+            continue
+        colors.append(
+            PhotoColorData(
+                id=int(color_id),
+                series_id=series_id,
+                color_type="exterior",
+                name=str(color.get("name") or ""),
+                value=color.get("value"),
+
+                isonsale=bool(color.get("isonsale")) if color.get("isonsale") is not None else None,
+            )
+        )
+    
+    # Парсим категории фото
+    pictypelist = result.get("pictypelist") or []
+    for category in pictypelist:
+        category_id = category.get("id")
+        if category_id is None:
+            continue
+        categories.append(
+            PhotoCategoryData(
+                id=int(category_id),
+                series_id=series_id,
+                name=str(category.get("name") or ""),
+            )
+        )
+    
+    return {"colors": colors, "categories": categories}
+
+
+def parse_pic_list(
+    payload: Dict[str, Any],
+    series_id: int,
+    spec_id: int,
+    category_id: int,
+    color_id: int,
+) -> Dict[str, Any]:
+    """
+    Парсит список фотографий из ответа API.
+    
+    Returns:
+        Словарь с ключами:
+        - "photos": список PhotoData
+        - "pagecount": общее количество страниц
+        - "rowcount": общее количество фото
+    """
+    result = payload.get("result") or {}
+    piclist = result.get("piclist") or []
+    
+    photos: List[PhotoData] = []
+    for pic in piclist:
+        pic_id = pic.get("id")
+        if not pic_id:
+            continue
+        
+        # Используем colorid из ответа API, если он есть и не равен 0
+        # Иначе используем color_id из параметров запроса
+        pic_colorid = pic.get("colorid", 0)
+        final_color_id = pic_colorid if pic_colorid and pic_colorid != 0 else color_id
+        
+        # Используем specid из ответа API, если он есть
+        # Иначе используем spec_id из параметров запроса
+        pic_specid = pic.get("specid")
+        final_spec_id = int(pic_specid) if pic_specid else spec_id
+        
+        photos.append(
+            PhotoData(
+                id=str(pic_id),
+                series_id=series_id,
+                specification_id=final_spec_id,
+                category_id=category_id,
+                color_id=final_color_id,
+                originalpic=pic.get("originalpic"),
+
+                specname=pic.get("specname"),
+            )
+        )
+    
+    return {
+        "photos": photos,
+        "pagecount": result.get("pagecount", 0),
+        "rowcount": result.get("rowcount", 0),
+    }
+
+
+def parse_pano_baseinfo(payload: Dict[str, Any], spec_id: int) -> Dict[str, Any]:
+    """
+    Парсит базовую информацию о панораме, включая список цветов для 360 фото.
+    
+    Args:
+        payload: JSON ответ от get_pano_baseinfo
+        spec_id: ID комплектации
+    
+    Returns:
+        Словарь с ключами:
+        - "ext_id": ID панорамы (ext.Id)
+        - "colors": список PanoramaColorData
+        - "photos": список PanoramaPhotoData (если есть в ответе)
+    """
+    ext = payload.get("ext") or {}
+    ext_id = ext.get("Id")
+    image_root = payload.get("image_root", "//panovr.autoimg.cn/pano")
+    
+    colors: List[PanoramaColorData] = []
+    photos: List[PanoramaPhotoData] = []
+    color_info_list = payload.get("color_info") or []
+    
+    for color_info in color_info_list:
+        color_id = color_info.get("ColorId")
+        if color_id is None:
+            continue
+        
+        color_data = PanoramaColorData(
+            id=int(color_info.get("Id", 0)),
+            spec_id=spec_id,
+            ext_id=ext_id,
+            base_color_name=color_info.get("BaseColorName"),
+            color_name=str(color_info.get("ColorName", "")),
+            color_value=color_info.get("ColorValue"),
+            color_id=int(color_id),
+        )
+        colors.append(color_data)
+        
+        # Парсим фото из Hori.Normal (если есть)
+        hori = color_info.get("Hori") or {}
+        normal_photos = hori.get("Normal") or []
+        
+        for photo_item in normal_photos:
+            seq = photo_item.get("Seq")
+            url_path = photo_item.get("Url")
+            
+            if seq is None or not url_path:
+                continue
+            
+            # Формируем полный URL
+            if url_path.startswith("http"):
+                full_url = url_path
+            else:
+                # Добавляем базовый путь, если URL относительный
+                # URL может быть вида: g33/M02/5D/F9/1200x0_autohomecar__ChxpVmlLnCuAd-9DACogVgSLl8g598.png.png
+                if url_path.startswith("g") and "/" in url_path:
+                    # Это путь вида g33/M02/5D/F9/...
+                    full_url = f"https:{image_root}/{url_path}"
+                elif not url_path.startswith("/"):
+                    url_path = "/" + url_path
+                    full_url = f"https:{image_root}{url_path}"
+                else:
+                    full_url = f"https:{image_root}{url_path}"
+            
+            # Формируем уникальный ID: spec_id_color_id_seq
+            photo_id = f"{spec_id}_{color_id}_{seq}"
+            
+            photos.append(
+                PanoramaPhotoData(
+                    id=photo_id,
+                    spec_id=spec_id,
+                    color_id=color_id,
+                    seq=int(seq),
+                    url=full_url,
+                )
+            )
+    
+    return {
+        "ext_id": ext_id,
+        "colors": colors,
+        "photos": photos,
+    }
+
+
+def parse_vr_info(
+    payload: Dict[str, Any],
+    spec_id: int,
+    color_id: int,
+) -> List[PanoramaPhotoData]:
+    """
+    Парсит список 360-градусных фото из ответа getVrInfo.
+    
+    Args:
+        payload: JSON ответ от get_vr_info
+        spec_id: ID комплектации
+        color_id: ID цвета
+    
+    Returns:
+        Список PanoramaPhotoData
+    """
+    result = payload.get("result") or {}
+    photo_list = result.get("l1") or []
+    
+    photos: List[PanoramaPhotoData] = []
+    for photo_item in photo_list:
+        seq = photo_item.get("seq")
+        url = photo_item.get("url")
+        
+        if seq is None or not url:
+            continue
+        
+        # Формируем уникальный ID: spec_id_color_id_seq
+        photo_id = f"{spec_id}_{color_id}_{seq}"
+        
+        photos.append(
+            PanoramaPhotoData(
+                id=photo_id,
+                spec_id=spec_id,
+                color_id=color_id,
+                seq=int(seq),
+                url=str(url),
+            )
+        )
+    
+    return photos

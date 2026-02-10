@@ -32,6 +32,21 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int_list(name: str, default: list[int]) -> list[int]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    result = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part:
+            try:
+                result.append(int(part))
+            except ValueError:
+                pass
+    return result if result else default
+
+
 def _env_str(name: str, default: str) -> str:
     raw = os.getenv(name)
     if raw is None:
@@ -54,6 +69,19 @@ class Settings:
     force_reparse: bool
     parse_workers: int
     models_per_brand: int
+    pagesize: int
+    img_path: str
+    parse_photos: bool
+    download_photos: bool
+    max_photo_combinations: int
+    max_colors: int
+    parse_panoramas: bool
+    download_panoramas: bool
+    parse_modes: list[int]
+    photo_360_only: bool
+    photo_360_only_categories: list[int]
+    log_dir: str
+    log_retention_days: int
 
     @property
     def database_url(self) -> str:
@@ -86,4 +114,17 @@ def load_settings() -> Settings:
         force_reparse=_env_bool("FORCE_REPARSE", True),
         parse_workers=_env_int("PARSE_WORKERS", 10),
         models_per_brand=_env_int("MODELS_PER_BRAND", 0),
+        pagesize=_env_int("PAGESIZE", 10),
+        img_path=_env_str("IMG_PATH", "IMG"),
+        parse_photos=_env_bool("PARSE_PHOTOS", True),
+        download_photos=_env_bool("DOWNLOAD_PHOTOS", True),
+        max_photo_combinations=_env_int("MAX_PHOTO_COMBINATIONS", 0),
+        max_colors=_env_int("MAX_COLORS", 0),
+        parse_panoramas=_env_bool("PARSE_PANORAMAS", True),
+        download_panoramas=_env_bool("DOWNLOAD_PANORAMAS", True),
+        parse_modes=_env_int_list("PARSE_MODES", [1]),
+        photo_360_only=_env_bool("360ONLY", False),
+        photo_360_only_categories=_env_int_list("360ONLYIDPHOTO", [1]),
+        log_dir=_env_str("LOG_DIR", "logs"),
+        log_retention_days=_env_int("LOG_RETENTION_DAYS", 7),
     )

@@ -172,6 +172,8 @@ def download_all_photos_for_series(
     base_path: str,
     download_types: list[str] = None,
     timeout: float = 10.0,
+    skip_spec_ids: set[int] | None = None,
+    only_category_ids: list[int] | None = None,
 ) -> dict:
     """
     Загружает все фотографии для указанной серии из БД.
@@ -183,6 +185,9 @@ def download_all_photos_for_series(
         download_types: Список типов для загрузки (original, big, small, nowebp). 
                        По умолчанию ['original']
         timeout: Таймаут запроса
+        skip_spec_ids: Множество spec_id, которые нужно пропустить (имеют 360 фото)
+        only_category_ids: Список ID категорий для загрузки
+                          (для спецификаций без 360 фото, при режиме 360only)
     
     Returns:
         Словарь со статистикой: {"downloaded": ..., "skipped": ..., "errors": ...}
@@ -198,19 +203,34 @@ def download_all_photos_for_series(
     errors = 0
     
     with session_scope(session_factory) as session:
-        photos = session.query(Photo).filter(Photo.series_id == series_id).all()
+        query = session.query(Photo).filter(Photo.series_id == series_id)
+        
+        # Фильтрация по режиму 360only
+        if skip_spec_ids:
+            query = query.filter(~Photo.specification_id.in_(skip_spec_ids))
+        if only_category_ids is not None:
+            query = query.filter(Photo.category_id.in_(only_category_ids))
+        
+        photos = query.all()
         total_photos = len(photos)
         
-        logger.info(f"Найдено {total_photos} фото для загрузки (серия {series_id})")
+        # Диагностика: группируем фото по spec_id
+        from collections import defaultdict
+        photos_by_spec = defaultdict(int)
+        for photo in photos:
+            photos_by_spec[photo.specification_id] += 1
+        
+        logger.debug(f"Найдено {total_photos} фото для загрузки (серия {series_id})")
+        if photos_by_spec:
+            logger.debug(f"Диагностика: фото распределены по {len(photos_by_spec)} комплектациям: {dict(sorted(photos_by_spec.items()))}")
         
         for index, photo in enumerate(photos, 1):
             try:
                 # Определяем какие типы загружать
                 url_map = {
                     'original': photo.originalpic,
-                    'big': photo.bigpic,
-                    'small': photo.smallpic,
-                    'nowebp': photo.nowebppic,
+
+
                 }
                 
                 downloaded_any = False
@@ -224,7 +244,7 @@ def download_all_photos_for_series(
                     local_path = download_photo(
                         photo_id=photo.id,
                         series_id=photo.series_id,
-                        spec_id=photo.spec_id,
+                        spec_id=photo.specification_id,
                         category_id=photo.category_id,
                         color_id=photo.color_id,
                         url=url,
@@ -252,30 +272,18 @@ def download_all_photos_for_series(
                 else:
                     skipped += 1
                 
-                # Показываем прогресс каждые 10 фото или на важных этапах
-                if index % 10 == 0 or index == 1 or index == total_photos:
-                    logger.info(
-                        f"Прогресс: {index}/{total_photos} "
-                        f"(скачано: {downloaded}, пропущено: {skipped}, ошибок: {errors})"
-                    )
-                # Дополнительное логирование каждые 50 загруженных фото
-                elif downloaded > 0 and downloaded % 50 == 0:
-                    logger.info(
-                        f"  ✓ Загружено {downloaded} фото "
-                        f"({index}/{total_photos} обработано)"
+                # Показываем прогресс каждые 50 фото
+                if index % 50 == 0 or index == total_photos:
+                    logger.debug(
+                        f"Серия {series_id}: {index}/{total_photos} "
+                        f"(↓={downloaded} проп={skipped} ош={errors})"
                     )
                     
             except Exception as e:
                 logger.error(f"Ошибка при загрузке фото {photo.id}: {e}")
                 errors += 1
-                # Показываем прогресс даже при ошибке
-                if index % 10 == 0 or index == total_photos:
-                    logger.info(
-                        f"Прогресс: {index}/{total_photos} "
-                        f"(скачано: {downloaded}, пропущено: {skipped}, ошибок: {errors})"
-                    )
     
-    logger.info(
+    logger.debug(
         f"Загрузка фото для серии {series_id} завершена: "
         f"скачано: {downloaded}, пропущено: {skipped}, ошибок: {errors}"
     )
