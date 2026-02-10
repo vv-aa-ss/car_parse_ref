@@ -174,6 +174,7 @@ def download_all_photos_for_series(
     timeout: float = 10.0,
     skip_spec_ids: set[int] | None = None,
     only_category_ids: list[int] | None = None,
+    progress_callback=None,
 ) -> dict:
     """
     Загружает все фотографии для указанной серии из БД.
@@ -269,8 +270,12 @@ def download_all_photos_for_series(
                             session.flush()
                     
                     downloaded += 1
+                    if progress_callback:
+                        progress_callback("downloaded")
                 else:
                     skipped += 1
+                    if progress_callback:
+                        progress_callback("skipped")
                 
                 # Показываем прогресс каждые 50 фото
                 if index % 50 == 0 or index == total_photos:
@@ -282,6 +287,8 @@ def download_all_photos_for_series(
             except Exception as e:
                 logger.error(f"Ошибка при загрузке фото {photo.id}: {e}")
                 errors += 1
+                if progress_callback:
+                    progress_callback("error")
     
     logger.debug(
         f"Загрузка фото для серии {series_id} завершена: "

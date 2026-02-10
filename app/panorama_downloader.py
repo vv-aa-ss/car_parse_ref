@@ -109,6 +109,7 @@ def _download_single_panorama_photo(
     stats: dict,
     lock: threading.Lock,
     session_factory,
+    progress_callback=None,
 ) -> None:
     """
     Загружает одно 360 фото (используется в параллельной загрузке).
@@ -132,6 +133,8 @@ def _download_single_panorama_photo(
             if file_path.exists():
                 with lock:
                     stats["skipped"] += 1
+                if progress_callback:
+                    progress_callback("skipped")
                 return
         
         # Скачиваем фото
@@ -156,14 +159,20 @@ def _download_single_panorama_photo(
             
             with lock:
                 stats["downloaded"] += 1
+            if progress_callback:
+                progress_callback("downloaded")
         else:
             with lock:
                 stats["errors"] += 1
+            if progress_callback:
+                progress_callback("error")
                 
     except Exception as e:
         logger.error(f"Ошибка при загрузке 360 фото {photo.id}: {e}")
         with lock:
             stats["errors"] += 1
+        if progress_callback:
+            progress_callback("error")
 
 
 def download_all_panorama_photos_for_spec(
@@ -172,6 +181,7 @@ def download_all_panorama_photos_for_spec(
     base_path: str,
     timeout: float = 10.0,
     max_workers: int = 10,
+    progress_callback=None,
 ) -> dict:
     """
     Загружает все 360 фото для указанной комплектации в файловую систему.
@@ -225,6 +235,7 @@ def download_all_panorama_photos_for_spec(
                     stats,
                     lock,
                     session_factory,
+                    progress_callback,
                 ): photo
                 for photo in photos
             }

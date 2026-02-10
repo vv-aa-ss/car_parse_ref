@@ -82,6 +82,7 @@ class Settings:
     photo_360_only_categories: list[int]
     log_dir: str
     log_retention_days: int
+    log_level: str
 
     @property
     def database_url(self) -> str:
@@ -127,4 +128,5 @@ def load_settings() -> Settings:
         photo_360_only_categories=_env_int_list("360ONLYIDPHOTO", [1]),
         log_dir=_env_str("LOG_DIR", "logs"),
         log_retention_days=_env_int("LOG_RETENTION_DAYS", 7),
+        log_level=_env_str("LOG_LEVEL", "INFO").upper(),
     )

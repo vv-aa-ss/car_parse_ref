@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import logging
 import logging.handlers
+import queue
 import sys
 import threading
 import time
@@ -40,14 +42,18 @@ def _print(msg: str = "") -> None:
 
 def _setup_logging(settings: Settings) -> None:
     """
-    Все логи (DEBUG+) пишутся ТОЛЬКО в файл с ротацией по дням.
-    В терминале ничего не выводится через logging —
-    ключевая информация выводится через _print() / tqdm.
+    Логи пишутся ТОЛЬКО в файл с ротацией по дням.
+    Уровень определяется настройкой LOG_LEVEL (по умолчанию INFO).
+    Используется QueueHandler → QueueListener для неблокирующего
+    логирования из многопоточного кода.
     """
     log_dir = Path(settings.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = log_dir / "parser.log"
+
+    # Уровень логирования из настроек
+    log_level = getattr(logging, settings.log_level, logging.INFO)
 
     file_handler = logging.handlers.TimedRotatingFileHandler(
         filename=str(log_file),
@@ -57,15 +63,26 @@ def _setup_logging(settings: Settings) -> None:
         encoding="utf-8",
     )
     file_handler.suffix = "%Y-%m-%d"
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(log_level)
     file_handler.setFormatter(logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s — %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
 
+    # QueueHandler: потоки кладут записи в очередь (мгновенно),
+    # QueueListener пишет в файл в отдельном потоке (без блокировки).
+    log_queue: queue.Queue = queue.Queue(-1)
+    queue_handler = logging.handlers.QueueHandler(log_queue)
+
     root = logging.getLogger()
-    root.handlers = [file_handler]
-    root.setLevel(logging.DEBUG)
+    root.handlers = [queue_handler]
+    root.setLevel(log_level)
+
+    listener = logging.handlers.QueueListener(
+        log_queue, file_handler, respect_handler_level=True
+    )
+    listener.start()
+    atexit.register(listener.stop)
 
     # Подавляем шумные библиотеки
     logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -258,9 +275,9 @@ def _download_photos_for_series(
     session_factory,
     base_path: str,
     timeout: float,
-    progress_counter: dict,
     skip_spec_ids: set[int] | None = None,
     only_category_ids: list[int] | None = None,
+    progress_callback=None,
 ) -> None:
     """
     Загружает фото для указанной серии в файловую систему.
@@ -270,7 +287,7 @@ def _download_photos_for_series(
     
     for attempt in range(max_retries):
         try:
-            result = download_all_photos_for_series(
+            download_all_photos_for_series(
                 series_id=series_id,
                 session_factory=session_factory,
                 base_path=base_path,
@@ -278,14 +295,8 @@ def _download_photos_for_series(
                 timeout=timeout,
                 skip_spec_ids=skip_spec_ids,
                 only_category_ids=only_category_ids,
+                progress_callback=progress_callback,
             )
-            
-            # Успешно обработано - обновляем счетчики
-            with progress_counter["lock"]:
-                progress_counter["parsed"] += 1
-                progress_counter["downloaded"] += result["downloaded"]
-                progress_counter["skipped"] += result["skipped"]
-                progress_counter["download_errors"] += result["errors"]
             return  # Успешно обработано
             
         except Exception as exc:
@@ -293,24 +304,15 @@ def _download_photos_for_series(
             is_deadlock = "DeadlockDetected" in error_msg or "deadlock" in error_msg.lower()
             
             if attempt < max_retries - 1 and is_deadlock:
-                # Retry для deadlock ошибок
                 time.sleep(retry_delay * (attempt + 1))
                 continue
             
-            # Финальная ошибка или не deadlock
-            with progress_counter["lock"]:
-                progress_counter["download_errors"] += 1
-                errors = progress_counter["download_errors"]
             logging.error(
-                "Ошибка при загрузке фото для серии %d (попытка %d/%d): %s (всего ошибок: %d)",
-                series_id,
-                attempt + 1,
-                max_retries,
-                error_msg,
-                errors,
+                "Ошибка при загрузке фото для серии %d (попытка %d/%d): %s",
+                series_id, attempt + 1, max_retries, error_msg,
             )
             if attempt == max_retries - 1:
-                return  # Не пробрасываем ошибку, чтобы не останавливать весь процесс
+                return
 
 
 def _parse_panoramas_for_spec(
@@ -416,8 +418,8 @@ def _download_panoramas_for_spec(
     session_factory,
     base_path: str,
     timeout: float,
-    progress_counter: dict,
     max_workers: int = 10,
+    progress_callback=None,
 ) -> None:
     """
     Загружает 360 фото для указанной комплектации в файловую систему.
@@ -427,20 +429,14 @@ def _download_panoramas_for_spec(
     
     for attempt in range(max_retries):
         try:
-            result = download_all_panorama_photos_for_spec(
+            download_all_panorama_photos_for_spec(
                 spec_id=spec_id,
                 session_factory=session_factory,
                 base_path=base_path,
                 timeout=timeout,
                 max_workers=max_workers,
+                progress_callback=progress_callback,
             )
-            
-            # Успешно обработано - обновляем счетчики
-            with progress_counter["lock"]:
-                progress_counter["parsed"] += 1
-                progress_counter["downloaded"] += result["downloaded"]
-                progress_counter["skipped"] += result["skipped"]
-                progress_counter["download_errors"] += result["errors"]
             return  # Успешно обработано
             
         except Exception as exc:
@@ -448,24 +444,15 @@ def _download_panoramas_for_spec(
             is_deadlock = "DeadlockDetected" in error_msg or "deadlock" in error_msg.lower()
             
             if attempt < max_retries - 1 and is_deadlock:
-                # Retry для deadlock ошибок
                 time.sleep(retry_delay * (attempt + 1))
                 continue
             
-            # Финальная ошибка или не deadlock
-            with progress_counter["lock"]:
-                progress_counter["download_errors"] += 1
-                errors = progress_counter["download_errors"]
             logging.error(
-                "Ошибка при загрузке 360 фото для spec_id %d (попытка %d/%d): %s (всего ошибок: %d)",
-                spec_id,
-                attempt + 1,
-                max_retries,
-                error_msg,
-                errors,
+                "Ошибка при загрузке 360 фото для spec_id %d (попытка %d/%d): %s",
+                spec_id, attempt + 1, max_retries, error_msg,
             )
             if attempt == max_retries - 1:
-                return  # Не пробрасываем ошибку, чтобы не останавливать весь процесс
+                return
 
 
 def main() -> None:
@@ -805,9 +792,25 @@ def main() -> None:
     if settings.download_photos:
         logging.info("Начало загрузки фотографий в файловую систему")
 
+        dl_skip_spec_ids = specs_with_panorama if settings.photo_360_only else None
+        dl_only_category_ids = settings.photo_360_only_categories if settings.photo_360_only else None
+
         with session_scope(session_factory) as session:
             series_with_photos = session.query(Photo.series_id).distinct().all()
             series_ids_for_download = [s[0] for s in series_with_photos if s[0] in series_ids]
+
+            # Подсчитываем общее количество фото для загрузки
+            if series_ids_for_download:
+                photo_query = session.query(Photo.id).filter(
+                    Photo.series_id.in_(series_ids_for_download)
+                )
+                if dl_skip_spec_ids:
+                    photo_query = photo_query.filter(~Photo.specification_id.in_(dl_skip_spec_ids))
+                if dl_only_category_ids is not None:
+                    photo_query = photo_query.filter(Photo.category_id.in_(dl_only_category_ids))
+                total_photos_to_download = photo_query.count()
+            else:
+                total_photos_to_download = 0
 
         if not series_ids_for_download:
             logging.info("Нет серий с фото для загрузки.")
@@ -815,64 +818,67 @@ def main() -> None:
             img_path = Path(settings.img_path)
             img_path.mkdir(parents=True, exist_ok=True)
 
-            logging.info("Найдено %d серий для загрузки фото → %s", len(series_ids_for_download), img_path.absolute())
+            logging.info("Найдено %d серий (%d фото) для загрузки → %s",
+                         len(series_ids_for_download), total_photos_to_download, img_path.absolute())
 
             download_progress = {
                 "lock": threading.Lock(),
-                "total": len(series_ids_for_download),
-                "parsed": 0,
                 "downloaded": 0,
                 "skipped": 0,
                 "download_errors": 0,
             }
 
-            dl_skip_spec_ids = specs_with_panorama if settings.photo_360_only else None
-            dl_only_category_ids = settings.photo_360_only_categories if settings.photo_360_only else None
-
             logging.info("Запуск загрузки фото в %d потоках...", settings.parse_workers)
             start_time = time.time()
 
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=settings.parse_workers
-            ) as executor:
-                futures = {
-                    executor.submit(
-                        _download_photos_for_series,
-                        series_id,
-                        session_factory,
-                        str(img_path),
-                        settings.api_timeout * 3,
-                        download_progress,
-                        dl_skip_spec_ids,
-                        dl_only_category_ids,
-                    ): series_id
-                    for series_id in series_ids_for_download
-                }
+            with _make_pbar(total_photos_to_download, "Загрузка фото", "фото", colour="cyan") as pbar:
 
-                with _make_pbar(len(series_ids_for_download), "Загрузка фото", "сер", colour="cyan") as pbar:
+                def _photo_dl_callback(status: str) -> None:
+                    with download_progress["lock"]:
+                        if status == "downloaded":
+                            download_progress["downloaded"] += 1
+                        elif status == "skipped":
+                            download_progress["skipped"] += 1
+                        else:
+                            download_progress["download_errors"] += 1
+                        dl = download_progress["downloaded"]
+                        elapsed = time.time() - start_time
+                        speed = dl / elapsed if elapsed > 0 else 0
+                        pbar.set_description_str(
+                            f"Загрузка фото | "
+                            f"↓={dl} проп={download_progress['skipped']} "
+                            f"({speed:.1f} ф/с) "
+                            f"ош={download_progress['download_errors']}"
+                        )
+                    pbar.update(1)
+
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=settings.parse_workers
+                ) as executor:
+                    futures = {
+                        executor.submit(
+                            _download_photos_for_series,
+                            series_id,
+                            session_factory,
+                            str(img_path),
+                            settings.api_timeout * 3,
+                            dl_skip_spec_ids,
+                            dl_only_category_ids,
+                            _photo_dl_callback,
+                        ): series_id
+                        for series_id in series_ids_for_download
+                    }
+
                     for future in concurrent.futures.as_completed(futures):
-                        sid = futures[future]
                         try:
                             future.result()
                         except Exception:
                             pass
-                        with download_progress["lock"]:
-                            elapsed = time.time() - start_time
-                            dl = download_progress["downloaded"]
-                            speed = dl / elapsed if elapsed > 0 else 0
-                            pbar.set_description_str(
-                                f"Загрузка фото сер={sid} | "
-                                f"↓={dl} проп={download_progress['skipped']} "
-                                f"({speed:.1f} ф/с) "
-                                f"ош={download_progress['download_errors']}"
-                            )
-                        pbar.update(1)
 
             elapsed_time = time.time() - start_time
-            logging.info("Загрузка фото завершена за %.1f сек (%.2f сек/серия) | "
+            logging.info("Загрузка фото завершена за %.1f сек | "
                          "Скачано: %d, пропущено: %d | Ошибок: %d",
                          elapsed_time,
-                         elapsed_time / max(download_progress["parsed"], 1),
                          download_progress["downloaded"],
                          download_progress["skipped"],
                          download_progress["download_errors"])
@@ -958,19 +964,27 @@ def main() -> None:
             specs_with_panoramas = session.query(PanoramaPhoto.spec_id).distinct().all()
             spec_ids_for_download = [s[0] for s in specs_with_panoramas]
 
+            # Подсчитываем общее количество 360 фото
+            if spec_ids_for_download:
+                total_pano_to_download = (
+                    session.query(PanoramaPhoto.id)
+                    .filter(PanoramaPhoto.spec_id.in_(spec_ids_for_download))
+                    .count()
+                )
+            else:
+                total_pano_to_download = 0
+
         if not spec_ids_for_download:
             logging.info("Нет комплектаций с 360 фото для загрузки.")
         else:
             img_path = Path(settings.img_path)
             img_path.mkdir(parents=True, exist_ok=True)
 
-            logging.info("Найдено %d комплектаций для загрузки 360 фото → %s",
-                         len(spec_ids_for_download), img_path.absolute())
+            logging.info("Найдено %d комплектаций (%d фото 360) для загрузки → %s",
+                         len(spec_ids_for_download), total_pano_to_download, img_path.absolute())
 
             panorama_download_progress = {
                 "lock": threading.Lock(),
-                "total": len(spec_ids_for_download),
-                "parsed": 0,
                 "downloaded": 0,
                 "skipped": 0,
                 "download_errors": 0,
@@ -979,48 +993,55 @@ def main() -> None:
             logging.info("Запуск загрузки 360 фото в %d потоках...", settings.parse_workers)
             start_time = time.time()
 
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=settings.parse_workers
-            ) as executor:
-                photo_workers_per_spec = min(5, settings.parse_workers // 2) if settings.parse_workers > 1 else 5
+            with _make_pbar(total_pano_to_download, "Загрузка 360", "фото", colour="magenta") as pbar:
 
-                futures = {
-                    executor.submit(
-                        _download_panoramas_for_spec,
-                        spec_id,
-                        session_factory,
-                        str(img_path),
-                        settings.api_timeout * 3,
-                        panorama_download_progress,
-                        photo_workers_per_spec,
-                    ): spec_id
-                    for spec_id in spec_ids_for_download
-                }
+                def _pano_dl_callback(status: str) -> None:
+                    with panorama_download_progress["lock"]:
+                        if status == "downloaded":
+                            panorama_download_progress["downloaded"] += 1
+                        elif status == "skipped":
+                            panorama_download_progress["skipped"] += 1
+                        else:
+                            panorama_download_progress["download_errors"] += 1
+                        dl = panorama_download_progress["downloaded"]
+                        elapsed = time.time() - start_time
+                        speed = dl / elapsed if elapsed > 0 else 0
+                        pbar.set_description_str(
+                            f"Загрузка 360 | "
+                            f"↓={dl} проп={panorama_download_progress['skipped']} "
+                            f"({speed:.1f} ф/с) "
+                            f"ош={panorama_download_progress['download_errors']}"
+                        )
+                    pbar.update(1)
 
-                with _make_pbar(len(spec_ids_for_download), "Загрузка 360", "спек", colour="magenta") as pbar:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=settings.parse_workers
+                ) as executor:
+                    photo_workers_per_spec = min(5, settings.parse_workers // 2) if settings.parse_workers > 1 else 5
+
+                    futures = {
+                        executor.submit(
+                            _download_panoramas_for_spec,
+                            spec_id,
+                            session_factory,
+                            str(img_path),
+                            settings.api_timeout * 3,
+                            photo_workers_per_spec,
+                            _pano_dl_callback,
+                        ): spec_id
+                        for spec_id in spec_ids_for_download
+                    }
+
                     for future in concurrent.futures.as_completed(futures):
-                        sid = futures[future]
                         try:
                             future.result()
                         except Exception:
                             pass
-                        with panorama_download_progress["lock"]:
-                            elapsed = time.time() - start_time
-                            dl = panorama_download_progress["downloaded"]
-                            speed = dl / elapsed if elapsed > 0 else 0
-                            pbar.set_description_str(
-                                f"Загрузка 360 спек={sid} | "
-                                f"↓={dl} проп={panorama_download_progress['skipped']} "
-                                f"({speed:.1f} ф/с) "
-                                f"ош={panorama_download_progress['download_errors']}"
-                            )
-                        pbar.update(1)
 
             elapsed_time = time.time() - start_time
-            logging.info("Загрузка 360 завершена за %.1f сек (%.2f сек/спек) | "
+            logging.info("Загрузка 360 завершена за %.1f сек | "
                          "Скачано: %d, пропущено: %d | Ошибок: %d",
                          elapsed_time,
-                         elapsed_time / max(panorama_download_progress["parsed"], 1),
                          panorama_download_progress["downloaded"],
                          panorama_download_progress["skipped"],
                          panorama_download_progress["download_errors"])
