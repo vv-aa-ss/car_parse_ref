@@ -191,7 +191,7 @@ def find_ext_id_for_spec(
         # Если API вернул ошибку (404, 500 и т.д.), это нормально - значит spec_id не является ext_id
         logger.debug(f"Не удалось использовать spec_id={spec_id} как ext_id: {e}")
     
-    logger.warning(f"Не удалось найти ext_id для spec_id={spec_id}")
+    logger.debug(f"Не найден ext_id для spec_id={spec_id} (нет панорамы)")
     return None
 
 
@@ -224,7 +224,7 @@ def parse_panorama_colors(spec_id: int, session_factory, client: AutohomeClient,
         if ext_id is None:
             ext_id = find_ext_id_for_spec(client, spec_id, session_factory)
             if ext_id is None:
-                logger.warning(f"Не удалось найти ext_id для spec_id={spec_id}, пропускаем")
+                # Нет панорамы — это нормально, не логируем как WARNING
                 return {
                     "colors": {"inserted": 0, "updated": 0, "skipped": 0},
                     "photos": {"inserted": 0, "updated": 0, "skipped": 0},
@@ -252,7 +252,7 @@ def parse_panorama_colors(spec_id: int, session_factory, client: AutohomeClient,
                     f"ID записи: {color.id}"
                 )
         else:
-            logger.warning("Не найдено цветов в color_info. Возможно, у этой комплектации нет фото 360.")
+            logger.debug(f"Нет цветов в color_info для spec_id={spec_id} — нет фото 360")
         
         # Сохраняем в БД
         with session_scope(session_factory) as session:
@@ -324,7 +324,7 @@ def parse_panorama_photos(
         # Получаем все цвета для 360 фото
         colors = session.query(PanoramaColor).filter(PanoramaColor.spec_id == spec_id).all()
         if not colors:
-            logger.warning(f"Не найдено цветов для 360 фото для spec_id {spec_id}. Сначала запустите parse_panorama_colors()")
+            logger.debug(f"Нет цветов для 360 фото spec_id={spec_id}")
             return {"inserted": 0, "updated": 0, "skipped": 0, "errors": 0}
         
         logger.debug(
