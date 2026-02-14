@@ -14,6 +14,46 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# Сигнатуры (magic bytes) для валидации изображений
+_IMAGE_SIGNATURES = {
+    b'\xff\xd8\xff': 'JPEG',
+    b'\x89PNG': 'PNG',
+    b'GIF8': 'GIF',
+    # WebP: RIFF....WEBP
+    b'RIFF': 'RIFF/WebP',
+}
+
+# Минимальный размер изображения (в байтах). Файлы меньше — скорее всего не изображения.
+_MIN_IMAGE_SIZE = 1024  # 1 КБ
+
+
+def _ensure_https(url: str) -> str:
+    """Конвертирует http:// в https:// для защиты от перехвата ISP."""
+    if url and url.startswith("http://"):
+        return "https://" + url[7:]
+    return url
+
+
+def _is_valid_image_content(data: bytes) -> bool:
+    """
+    Проверяет, что данные начинаются с сигнатуры известного формата изображений.
+    
+    Returns:
+        True если данные похожи на изображение, False иначе
+    """
+    if len(data) < 4:
+        return False
+    
+    for signature in _IMAGE_SIGNATURES:
+        if data[:len(signature)] == signature:
+            # Дополнительная проверка для WebP: RIFF....WEBP
+            if signature == b'RIFF' and len(data) >= 12:
+                if data[8:12] != b'WEBP':
+                    continue  # RIFF, но не WebP — не наш формат
+            return True
+    
+    return False
+
 
 def get_file_extension(url: str) -> str:
     """Определяет расширение файла из URL."""
@@ -33,6 +73,12 @@ def download_image(url: str, file_path: Path, timeout: float = 10.0, max_retries
     """
     Скачивает изображение по URL и сохраняет в файл.
     
+    Включает защиту от подмены контента провайдером (ISP):
+    - Конвертирует http:// в https://
+    - Проверяет Content-Type заголовок
+    - Валидирует magic bytes изображения
+    - Проверяет минимальный размер файла
+    
     Args:
         url: URL изображения
         file_path: Путь для сохранения файла
@@ -43,8 +89,30 @@ def download_image(url: str, file_path: Path, timeout: float = 10.0, max_retries
         True если успешно, False в противном случае
     """
     if file_path.exists():
-        logger.debug(f"Файл уже существует: {file_path}")
-        return True
+        # Проверяем, не является ли существующий файл "битым" (слишком маленький / не изображение)
+        file_size = file_path.stat().st_size
+        if file_size < _MIN_IMAGE_SIZE:
+            logger.warning(
+                f"Существующий файл подозрительно мал ({file_size} Б), "
+                f"перекачиваем: {file_path}"
+            )
+            file_path.unlink()
+        else:
+            # Быстрая проверка magic bytes у существующего файла
+            with open(file_path, 'rb') as f:
+                header = f.read(12)
+            if not _is_valid_image_content(header):
+                logger.warning(
+                    f"Существующий файл не является изображением, "
+                    f"перекачиваем: {file_path}"
+                )
+                file_path.unlink()
+            else:
+                logger.debug(f"Файл уже существует: {file_path}")
+                return True
+    
+    # Конвертируем HTTP в HTTPS для защиты от перехвата ISP
+    safe_url = _ensure_https(url)
     
     headers = {
         "User-Agent": (
@@ -57,16 +125,53 @@ def download_image(url: str, file_path: Path, timeout: float = 10.0, max_retries
     last_error = None
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, headers=headers, timeout=timeout, stream=True)
+            response = requests.get(safe_url, headers=headers, timeout=timeout, stream=True)
             response.raise_for_status()
+            
+            # Проверяем Content-Type заголовок
+            content_type = response.headers.get('Content-Type', '').lower()
+            if content_type and not content_type.startswith('image/'):
+                # Если Content-Type явно не image/* — это подмена (HTML, text и т.д.)
+                logger.warning(
+                    f"Ответ не является изображением (Content-Type: {content_type}), "
+                    f"URL: {safe_url}"
+                )
+                response.close()
+                return False
             
             # Создаем директорию если нужно
             file_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Сохраняем файл
+            # Скачиваем содержимое
+            content = response.content
+            
+            # Проверяем минимальный размер
+            if len(content) < _MIN_IMAGE_SIZE:
+                logger.warning(
+                    f"Размер ответа слишком мал ({len(content)} Б), "
+                    f"вероятно подмена контента. URL: {safe_url}"
+                )
+                return False
+            
+            # Проверяем magic bytes
+            if not _is_valid_image_content(content[:12]):
+                # Определяем что это (HTML? текст?)
+                preview = content[:200].decode('utf-8', errors='replace')
+                if '<html' in preview.lower() or '<!doctype' in preview.lower():
+                    logger.warning(
+                        f"Получен HTML вместо изображения (вероятно ISP-перехват). "
+                        f"URL: {safe_url}"
+                    )
+                else:
+                    logger.warning(
+                        f"Содержимое не является изображением. "
+                        f"URL: {safe_url}, начало: {content[:20]!r}"
+                    )
+                return False
+            
+            # Все проверки пройдены — сохраняем файл
             with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+                f.write(content)
             
             logger.debug(f"Скачано: {file_path}")
             return True
@@ -77,7 +182,7 @@ def download_image(url: str, file_path: Path, timeout: float = 10.0, max_retries
                 wait_time = (attempt + 1) * 0.5
                 time.sleep(wait_time)
             else:
-                logger.error(f"Ошибка при скачивании {url}: {e}")
+                logger.error(f"Ошибка при скачивании {safe_url}: {e}")
     
     return False
 

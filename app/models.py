@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -21,6 +22,7 @@ class Brand(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=False)
+    name_en = Column(String(255), nullable=True)  # Перевод на английский
     logo_url = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -34,6 +36,7 @@ class Series(Base):
     id = Column(Integer, primary_key=True)
     brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
     name = Column(String(255), nullable=False)
+    name_en = Column(String(255), nullable=True)  # Перевод на английский
     is_new_energy = Column(Boolean, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -48,6 +51,7 @@ class Spec(Base):
     id = Column(Integer, primary_key=True)
     series_id = Column(Integer, ForeignKey("series.id"), nullable=False)
     name = Column(String(255), nullable=False)
+    name_en = Column(String(512), nullable=True)  # Перевод на английский
     min_price = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -62,7 +66,9 @@ class ParamTitle(Base):
     series_id = Column(Integer, ForeignKey("series.id"), primary_key=True)
     title_id = Column(Integer, primary_key=True)
     item_name = Column(String(512), nullable=False)
+    item_name_ru = Column(String(512), nullable=True)  # Перевод на русский
     group_name = Column(String(255), nullable=True)
+    group_name_ru = Column(String(255), nullable=True)  # Перевод на русский
     item_type = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -78,6 +84,7 @@ class ParamValue(Base):
     item_name = Column(String(512), primary_key=True)  # Увеличено с 255 до 512
     sub_name = Column(String(512), primary_key=True, nullable=True)  # Увеличено с 255 до 512
     value = Column(Text, nullable=True)
+    value_ru = Column(Text, nullable=True)  # Перевод значения на русский
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -91,6 +98,7 @@ class PhotoColor(Base):
     series_id = Column(Integer, ForeignKey("series.id"), nullable=False)
     color_type = Column(String(16), nullable=False)  # "interior" или "exterior"
     name = Column(String(255), nullable=False)
+    name_ru = Column(String(255), nullable=True)  # Перевод на русский
     value = Column(String(255), nullable=True)  # HEX код цвета
 
     isonsale = Column(Boolean, nullable=True)  # В продаже
@@ -106,6 +114,7 @@ class PhotoCategory(Base):
     id = Column(Integer, primary_key=True)
     series_id = Column(Integer, ForeignKey("series.id"), primary_key=True)
     name = Column(String(255), nullable=False)
+    name_ru = Column(String(255), nullable=True)  # Перевод на русский
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -139,7 +148,9 @@ class PanoramaColor(Base):
     spec_id = Column(Integer, ForeignKey("specification.id"), nullable=False)
     ext_id = Column(Integer, nullable=True)  # ID панорамы (ext.Id)
     base_color_name = Column(String(255), nullable=True)  # BaseColorName
+    base_color_name_ru = Column(String(255), nullable=True)  # Перевод на русский
     color_name = Column(String(255), nullable=False)  # ColorName
+    color_name_ru = Column(String(255), nullable=True)  # Перевод на русский
     color_value = Column(String(16), nullable=True)  # ColorValue (HEX)
     color_id = Column(Integer, nullable=False)  # ColorId (используется в getVrInfo)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -162,3 +173,19 @@ class PanoramaPhoto(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     spec = relationship("Spec", backref="panorama_photos")
+
+
+class TranslationCache(Base):
+    """Кэш переводов: хранит уже переведённые строки, чтобы не запрашивать API повторно."""
+    __tablename__ = "translation_cache"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_hash = Column(String(64), nullable=False)  # SHA256 от source_text
+    source_text = Column(Text, nullable=False)
+    target_lang = Column(String(10), nullable=False)  # 'en' или 'ru'
+    translated_text = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("source_hash", "target_lang", name="uq_translation_hash_lang"),
+    )
